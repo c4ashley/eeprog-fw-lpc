@@ -1,0 +1,8 @@
+eeprog.axf
+eeprog.bin
+eeprog.lst
+eeprog.sz
+main.o
+main.su
+system/startup.o
+system/startup.su
