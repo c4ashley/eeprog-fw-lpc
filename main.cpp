@@ -19,8 +19,10 @@
  * */
 
 static constexpr int PinOE { 25 };
-static constexpr int PinWR { 26 };
+static constexpr int PinWR { 26 }; // shared with A18 for extended (4M) devices
 static constexpr int PinCE { 32+17 };
+
+static constexpr uint8_t ACK { 0 };
 
 static void SetLed(uint8_t state)
 {
@@ -34,7 +36,9 @@ enum ProgrammingFlags : uint8_t
 {
 	PF_Verify = 1,
 	PF_Retain = 2,
-	PF_Dump   = 0xF0
+	PF_Dump   = 1 << 4,
+	PF_Extended = 1 << 5,
+	PF_ExtendedPage = 1 << 6
 };
 
 void SendToHost(uint8_t value);
@@ -213,8 +217,11 @@ int main(void)
 		.GPIO1 = 1,
 		};
 	SYSCON::AHBCLKCTRLSET1 = decltype(*SYSCON::AHBCLKCTRLSET1) { .FLEXCOMM0 = 1 };
+	// 1. Set to FRO_12M
+	// 2. Call API to select 96MHz
+	// 3. Set HSPDCLK (FROCTRL.bit30)
+	// 4. Set to FRO_HF
 	SYSCON::FCLKSEL0 = 0; // fro_12m
-	//SYSCON::FCLKSEL0 = 1; // fro_hf (96MHz)
 
 	s_iRxLog = 0;
 	s_startProgramming = 0;
@@ -225,15 +232,20 @@ int main(void)
 	s_rxIndex = 0;
 
 	Flexcomm0::PSELID->PERSEL = 1; // USART
-	USART0::CFG.Volatile()->ENABLE = 1;
-	USART0::CFG.Volatile()->DATALEN = 1;
+
 	// BRGVAL = ((FCLK / (OSRVAL+1)) / baud) - 1
 	//      L = ((12e6 / 13) / 38400) - 1 ≈ 24.03846154
 	// baud = (FCLK / (OSRVAL+1)) / (BRGVAL+1)
 	//      =  (12e6 / 13) / 24 ≈ 38461.53846
-	USART0::BRG = 23; //38400 (38462, 0.16% error)
-	USART0::OSR = 12;
-	//USART0::BRG = 51; //115200 (115384, 0.16% error)
+	//USART0::BRG = 23; //38400 (38462, 0.16% error)
+
+	USART0::OSR = 7;
+	USART0::BRG = 12; //115200
+	// (12e6/8) / 115200 - 1 = 12.02083333
+	// (12e6/8)/13 = 115384.6154 (0.16% error)
+ 
+	USART0::CFG.Volatile()->ENABLE = 1;
+	USART0::CFG.Volatile()->DATALEN = 1;
 	USART0::FIFOCFG->ENABLETX = 1;
 	USART0::FIFOCFG->ENABLERX = 1;
 
@@ -329,12 +341,16 @@ int main(void)
 DoItAllAgain:
 	while (!s_startProgramming) ;
 
-	if ((s_programmingFlags & 0xF0) == PF_Dump)
+	if ((s_programmingFlags & PF_Dump) == PF_Dump)
 	{
+		if (s_programmingFlags & PF_Extended)
+			GPIO::BYTE.Volatile()->PBYTE[PinWR] = (s_programmingFlags & PF_ExtendedPage) != 0;
 		Dump();
+		if (s_programmingFlags & PF_Extended)
+			GPIO::BYTE.Volatile()->PBYTE[PinWR] = 0;
 		s_startProgramming = false;
 		s_rxState = 0;
-		SendToHost(0);
+		SendToHost(ACK);
 		goto DoItAllAgain;
 	}
 
@@ -510,7 +526,7 @@ extern "C" void FLEXCOMM0_IRQHandler(void)
 			case 4: // count
 			{
 				s_count = data + 1;
-				if ((s_programmingFlags & 0xF0) == PF_Dump)
+				if ((s_programmingFlags & PF_Dump) == PF_Dump)
 				{
 					s_rxState = 6;
 					s_startProgramming = true;
